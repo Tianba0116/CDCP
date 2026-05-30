@@ -197,18 +197,11 @@ if __name__ == '__main__':
     n_speakers= 9 if args.Dataset=='MELD' else 2
     n_classes = 7 if args.Dataset=='MELD' else 6 if args.Dataset=='IEMOCAP' else 1
 
-    print('temp {}'.format(args.temp))
-
     model = CDCP(args,args.Dataset, args.temp, D_text, D_visual, D_audio, args.n_head,
                                         n_classes=n_classes,
                                         hidden_dim=args.hidden_dim,
                                         n_speakers=n_speakers,
                                         dropout=args.dropout)
-
-    total_params = sum(p.numel() for p in model.parameters())
-    print('total parameters: {}'.format(total_params))
-    total_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print('training parameters: {}'.format(total_trainable_params))
 
     if cuda:
         model.cuda()
