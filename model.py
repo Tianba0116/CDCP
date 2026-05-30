@@ -2,9 +2,18 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from MOE import MoMKE
-from torch.nn import Parameter
+
+
+class MaskedKLDivLoss(nn.Module):
+    def __init__(self):
+        super(MaskedKLDivLoss, self).__init__()
+        self.loss = nn.KLDivLoss(reduction='sum')
+
+    def forward(self, log_pred, target, mask):
+        mask_ = mask.view(-1, 1)
+        loss = self.loss(log_pred * mask_, target * mask_) / torch.sum(mask)
+        return loss
 
 
 class MaskedNLLLoss(nn.Module):
@@ -15,19 +24,16 @@ class MaskedNLLLoss(nn.Module):
 
     def forward(self, pred, target, mask):
         mask_ = mask.view(-1, 1)
-        if self.weight is None:
+        if type(self.weight) == type(None):
             loss = self.loss(pred * mask_, target) / torch.sum(mask)
         else:
-            loss = self.loss(pred * mask_, target) / torch.sum(
-                self.weight[target] * mask_.squeeze()
-            )
+            loss = self.loss(pred * mask_, target) \
+                   / torch.sum(self.weight[target] * mask_.squeeze())
         return loss
 
 
 def gelu(x):
-    return 0.5 * x * (
-        1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3)))
-    )
+    return 0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
 
 
 class PositionwiseFeedForward(nn.Module):
@@ -48,11 +54,10 @@ class PositionwiseFeedForward(nn.Module):
 
 class MultiHeadedAttention(nn.Module):
     def __init__(self, head_count, model_dim, dropout=0.1):
-        super(MultiHeadedAttention, self).__init__()
         assert model_dim % head_count == 0
-
         self.dim_per_head = model_dim // head_count
-        self.model_dim = model_dim
+
+        super(MultiHeadedAttention, self).__init__()
         self.head_count = head_count
 
         self.linear_k = nn.Linear(model_dim, head_count * self.dim_per_head)
@@ -80,9 +85,8 @@ class MultiHeadedAttention(nn.Module):
 
         attn = self.softmax(scores)
         drop_attn = self.dropout(attn)
-        context = torch.matmul(drop_attn, value).transpose(1, 2).contiguous().view(
-            batch_size, -1, head_count * dim_per_head
-        )
+        context = torch.matmul(drop_attn, value).transpose(1, 2).\
+                    contiguous().view(batch_size, -1, head_count * dim_per_head)
         output = self.linear(context)
         attn_mean = attn.mean(dim=1)
         return output, attn_mean
@@ -93,37 +97,44 @@ class PositionalEncoding(nn.Module):
         super(PositionalEncoding, self).__init__()
         pe = torch.zeros(max_len, dim)
         position = torch.arange(0, max_len).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, dim, 2, dtype=torch.float) * (-(math.log(10000.0) / dim))
-        )
+        div_term = torch.exp((torch.arange(0, dim, 2, dtype=torch.float) *
+                              -(math.log(10000.0) / dim)))
         pe[:, 0::2] = torch.sin(position.float() * div_term)
         pe[:, 1::2] = torch.cos(position.float() * div_term)
         pe = pe.unsqueeze(0)
-        self.register_buffer("pe", pe)
+        self.register_buffer('pe', pe)
 
     def forward(self, x, speaker_emb):
         L = x.size(1)
         pos_emb = self.pe[:, :L]
-        return x + pos_emb + speaker_emb
+        x = x + pos_emb + speaker_emb
+        return x
 
 
 class TransformerEncoderLayer(nn.Module):
     def __init__(self, d_model, heads, d_ff, dropout):
         super(TransformerEncoderLayer, self).__init__()
-        self.self_attn = MultiHeadedAttention(heads, d_model, dropout=dropout)
+        self.self_attn = MultiHeadedAttention(
+            heads, d_model, dropout=dropout)
         self.feed_forward = PositionwiseFeedForward(d_model, d_ff, dropout)
         self.layer_norm = nn.LayerNorm(d_model, eps=1e-6)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, iter, inputs_a, inputs_b, mask):
         if inputs_a.equal(inputs_b):
-            if iter != 0:
+            if (iter != 0):
                 inputs_b = self.layer_norm(inputs_b)
+            else:
+                inputs_b = inputs_b
+
             mask = mask.unsqueeze(1)
             context, attn = self.self_attn(inputs_b, inputs_b, inputs_b, mask=mask)
         else:
-            if iter != 0:
+            if (iter != 0):
                 inputs_b = self.layer_norm(inputs_b)
+            else:
+                inputs_b = inputs_b
+
             mask = mask.unsqueeze(1)
             context, attn = self.self_attn(inputs_a, inputs_a, inputs_b, mask=mask)
 
@@ -139,8 +150,8 @@ class TransformerEncoder(nn.Module):
         self.pos_emb = PositionalEncoding(d_model)
         self.dropout = nn.Dropout(dropout)
         self.transformer_inter = nn.ModuleList(
-            [TransformerEncoderLayer(d_model, heads, d_ff, dropout) for _ in range(layers)]
-        )
+            [TransformerEncoderLayer(d_model, heads, d_ff, dropout)
+             for _ in range(layers)])
 
     def forward(self, x_a, x_b, mask, speaker_emb):
         if x_a.equal(x_b):
@@ -162,13 +173,14 @@ class Unimodal_GatedFusion(nn.Module):
     def __init__(self, hidden_size, dataset):
         super(Unimodal_GatedFusion, self).__init__()
         self.fc = nn.Linear(hidden_size, hidden_size, bias=False)
-        if dataset == "MELD":
+        if dataset == 'MELD':
             self.fc.weight.data.copy_(torch.eye(hidden_size, hidden_size))
             self.fc.weight.requires_grad = False
 
     def forward(self, a):
         z = torch.sigmoid(self.fc(a))
-        return z * a
+        final_rep = z * a
+        return final_rep
 
 
 class Multimodal_GatedFusion(nn.Module):
@@ -181,82 +193,12 @@ class Multimodal_GatedFusion(nn.Module):
         a_new = a.unsqueeze(-2)
         b_new = b.unsqueeze(-2)
         c_new = c.unsqueeze(-2)
-
         utters = torch.cat([a_new, b_new, c_new], dim=-2)
-        utters_fc = torch.cat(
-            [
-                self.fc(a).unsqueeze(-2),
-                self.fc(b).unsqueeze(-2),
-                self.fc(c).unsqueeze(-2),
-            ],
-            dim=-2,
-        )
+        utters_fc = torch.cat([self.fc(a).unsqueeze(-2), self.fc(b).unsqueeze(-2), self.fc(c).unsqueeze(-2)], dim=-2)
         utters_softmax = self.softmax(utters_fc)
         utters_three_model = utters_softmax * utters
         final_rep = torch.sum(utters_three_model, dim=-2, keepdim=False)
         return final_rep
-
-
-class mask_GatedFusion(nn.Module):
-    def __init__(self, hidden_size):
-        super(mask_GatedFusion, self).__init__()
-        self.fc = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.softmax = nn.Softmax(dim=-2)
-
-    def forward(self, a, b):
-        a_new = a.unsqueeze(-2)
-        b_new = b.unsqueeze(-2)
-
-        utters = torch.cat([a_new, b_new], dim=-2)
-        utters_fc = torch.cat(
-            [self.fc(a).unsqueeze(-2), self.fc(b).unsqueeze(-2)],
-            dim=-2,
-        )
-        utters_softmax = self.softmax(utters_fc)
-        utters_two_model = utters_softmax * utters
-        final_rep = torch.sum(utters_two_model, dim=-2, keepdim=False)
-        return final_rep
-
-
-class ConNet(nn.Module):
-    def __init__(self, input_dim):
-        super(ConNet, self).__init__()
-        self.conf_net = nn.Linear(input_dim, 1, bias=True)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        return self.sigmoid(self.conf_net(x))
-
-
-class SGConv_Our(nn.Module):
-    def __init__(self, in_features, out_features, bias=True):
-        super(SGConv_Our, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.weight = Parameter(torch.FloatTensor(in_features, out_features))
-        if bias:
-            self.bias = Parameter(torch.FloatTensor(out_features))
-        else:
-            self.register_parameter("bias", None)
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        stdv = 1.0 / math.sqrt(self.weight.size(1))
-        self.weight.data.uniform_(-stdv, stdv)
-        if self.bias is not None:
-            self.bias.data.uniform_(-stdv, stdv)
-
-    def forward(self, input, adj):
-        try:
-            input = input.float()
-        except Exception:
-            pass
-
-        support = torch.mm(input, self.weight)
-        output = torch.spmm(adj, support)
-        if self.bias is not None:
-            return output + self.bias
-        return output
 
 
 class s_AttentionDiffusion(nn.Module):
@@ -268,7 +210,7 @@ class s_AttentionDiffusion(nn.Module):
         self.theta_mlp = nn.Sequential(
             nn.Linear(hidden_dim, theta_hidden_dim),
             nn.ReLU(),
-            nn.Linear(theta_hidden_dim, steps + 1),
+            nn.Linear(theta_hidden_dim, steps + 1)
         )
         self.pos_emb = PositionalEncoding(hidden_dim)
         self.dropout = nn.Dropout(0.5)
@@ -292,6 +234,7 @@ class s_AttentionDiffusion(nn.Module):
         theta = torch.softmax(theta_logits, dim=-1)
 
         final_features = torch.zeros_like(x)
+
         P_power = torch.eye(N, device=device).unsqueeze(0).repeat(B, 1, 1)
 
         for i in range(self.steps + 1):
@@ -303,14 +246,17 @@ class s_AttentionDiffusion(nn.Module):
             final_features += torch.bmm(weighted_P, x)
 
         output = self.norm(final_features + node_features)
+
         return output
 
 
 class LengthAdaptiveSemanticGraph(nn.Module):
     def __init__(self, input_dim, shared_dim=64, init_alpha=1.0):
         super(LengthAdaptiveSemanticGraph, self).__init__()
+
         self.proj = nn.Linear(input_dim, shared_dim)
         nn.init.xavier_normal_(self.proj.weight)
+
         self.raw_alpha = nn.Parameter(torch.tensor(0.0))
 
     def forward(self, x, umask, qmask):
@@ -326,9 +272,10 @@ class LengthAdaptiveSemanticGraph(nn.Module):
 
         learned_alpha = torch.exp(self.raw_alpha)
         learned_alpha = torch.clamp(learned_alpha, min=0.1, max=5.0)
+
         sigma = learned_alpha * math.log2(max(L, 2))
 
-        decay_matrix = torch.exp(-(dist_matrix ** 2) / (2 * (sigma ** 2)))
+        decay_matrix = torch.exp(- (dist_matrix ** 2) / (2 * (sigma ** 2)))
         decay_matrix = decay_matrix.unsqueeze(0).expand(B, -1, -1)
 
         if qmask.dim() == 3:
@@ -338,7 +285,7 @@ class LengthAdaptiveSemanticGraph(nn.Module):
 
         s_id = qmask_ids.unsqueeze(2)
         t_id = qmask_ids.unsqueeze(1)
-        is_same = s_id == t_id
+        is_same = (s_id == t_id)
         is_diff = ~is_same
 
         scores_s = sim_matrix
@@ -348,9 +295,7 @@ class LengthAdaptiveSemanticGraph(nn.Module):
         valid_mask = (umask.unsqueeze(2) * umask.unsqueeze(1)).bool()
         base_mask = causal_mask & valid_mask
 
-        all_valid_scores = (
-            (scores_s * is_same.float() + scores_c * is_diff.float()) * base_mask.float()
-        )
+        all_valid_scores = (scores_s * is_same.float() + scores_c * is_diff.float()) * base_mask.float()
         mean_score = all_valid_scores.sum() / (base_mask.float().sum() + 1e-6)
 
         smask = (scores_s > mean_score) & is_same & base_mask
@@ -363,47 +308,25 @@ class LengthAdaptiveSemanticGraph(nn.Module):
 
 
 class CDCP(nn.Module):
-    def __init__(
-        self,
-        args,
-        dataset,
-        temp,
-        D_text,
-        D_visual,
-        D_audio,
-        n_head,
-        n_classes,
-        hidden_dim,
-        n_speakers,
-        dropout,
-    ):
+    def __init__(self, args, dataset, temp, D_text, D_visual, D_audio, n_head,
+                 n_classes, hidden_dim, n_speakers, dropout):
         super(CDCP, self).__init__()
         self.temp = temp
         self.n_classes = n_classes
         self.n_speakers = n_speakers
-
         if self.n_speakers == 2:
             padding_idx = 2
-        elif self.n_speakers == 9:
+        if self.n_speakers == 9:
             padding_idx = 9
-        else:
-            padding_idx = n_speakers
-
-        self.speaker_embeddings = nn.Embedding(n_speakers + 1, hidden_dim, padding_idx)
+        self.speaker_embeddings = nn.Embedding(n_speakers+1, hidden_dim, padding_idx)
 
         self.textf_input = nn.Conv1d(D_text, hidden_dim, kernel_size=1, padding=0, bias=False)
         self.acouf_input = nn.Conv1d(D_audio, hidden_dim, kernel_size=1, padding=0, bias=False)
         self.visuf_input = nn.Conv1d(D_visual, hidden_dim, kernel_size=1, padding=0, bias=False)
 
-        self.t_t = TransformerEncoder(
-            d_model=hidden_dim, d_ff=hidden_dim, heads=n_head, layers=1, dropout=dropout
-        )
-        self.a_a = TransformerEncoder(
-            d_model=hidden_dim, d_ff=hidden_dim, heads=n_head, layers=1, dropout=dropout
-        )
-        self.v_v = TransformerEncoder(
-            d_model=hidden_dim, d_ff=hidden_dim, heads=n_head, layers=1, dropout=dropout
-        )
+        self.t_t = TransformerEncoder(d_model=hidden_dim, d_ff=hidden_dim, heads=n_head, layers=1, dropout=dropout)
+        self.a_a = TransformerEncoder(d_model=hidden_dim, d_ff=hidden_dim, heads=n_head, layers=1, dropout=dropout)
+        self.v_v = TransformerEncoder(d_model=hidden_dim, d_ff=hidden_dim, heads=n_head, layers=1, dropout=dropout)
 
         self.t_t_gate = Unimodal_GatedFusion(hidden_dim, dataset)
         self.a_t_gate = Unimodal_GatedFusion(hidden_dim, dataset)
@@ -420,18 +343,18 @@ class CDCP(nn.Module):
         self.t_output_layer = nn.Sequential(
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, n_classes),
-        )
+            nn.Linear(hidden_dim, n_classes)
+            )
         self.a_output_layer = nn.Sequential(
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, n_classes),
-        )
+            nn.Linear(hidden_dim, n_classes)
+            )
         self.v_output_layer = nn.Sequential(
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, n_classes),
-        )
+            nn.Linear(hidden_dim, n_classes)
+            )
         self.all_output_layer = nn.Linear(hidden_dim, n_classes)
 
         self.modal_fusion = nn.Sequential(
@@ -445,25 +368,12 @@ class CDCP(nn.Module):
 
         steps = args.steps
         thera_hidden_dim = args.thera_hidden_dim
-
-        self.t_t_s = s_AttentionDiffusion(
-            hidden_dim, n_head, steps=steps, theta_hidden_dim=thera_hidden_dim
-        )
-        self.t_t_c = s_AttentionDiffusion(
-            hidden_dim, n_head, steps=steps, theta_hidden_dim=thera_hidden_dim
-        )
-        self.a_a_s = s_AttentionDiffusion(
-            hidden_dim, n_head, steps=steps, theta_hidden_dim=thera_hidden_dim
-        )
-        self.a_a_c = s_AttentionDiffusion(
-            hidden_dim, n_head, steps=steps, theta_hidden_dim=thera_hidden_dim
-        )
-        self.v_v_s = s_AttentionDiffusion(
-            hidden_dim, n_head, steps=steps, theta_hidden_dim=thera_hidden_dim
-        )
-        self.v_v_c = s_AttentionDiffusion(
-            hidden_dim, n_head, steps=steps, theta_hidden_dim=thera_hidden_dim
-        )
+        self.t_t_s = s_AttentionDiffusion(hidden_dim, n_head, steps=steps, theta_hidden_dim=thera_hidden_dim)
+        self.t_t_c = s_AttentionDiffusion(hidden_dim, n_head, steps=steps, theta_hidden_dim=thera_hidden_dim)
+        self.a_a_s = s_AttentionDiffusion(hidden_dim, n_head, steps=steps, theta_hidden_dim=thera_hidden_dim)
+        self.a_a_c = s_AttentionDiffusion(hidden_dim, n_head, steps=steps, theta_hidden_dim=thera_hidden_dim)
+        self.v_v_s = s_AttentionDiffusion(hidden_dim, n_head, steps=steps, theta_hidden_dim=thera_hidden_dim)
+        self.v_v_c = s_AttentionDiffusion(hidden_dim, n_head, steps=steps, theta_hidden_dim=thera_hidden_dim)
 
         self.MOE = MoMKE(
             args=args,
@@ -474,26 +384,22 @@ class CDCP(nn.Module):
             n_classes=n_classes,
             depth=args.MOE_depth,
             num_heads=8,
-            mlp_ratio=1.0,
+            mlp_ratio=1.0
         )
-
         self.fusion = nn.Linear(3 * hidden_dim, hidden_dim)
-
         self.t_k = LengthAdaptiveSemanticGraph(hidden_dim, shared_dim=64)
         self.a_k = LengthAdaptiveSemanticGraph(hidden_dim, shared_dim=64)
         self.v_k = LengthAdaptiveSemanticGraph(hidden_dim, shared_dim=64)
 
-    def forward(self, textf, visuf, acouf, u_mask, qmask, dia_len, label, args):
+    def forward(self, textf, visuf, acouf, u_mask, qmask, dia_len):
         spk_idx = torch.argmax(qmask, -1)
         origin_spk_idx = spk_idx
-
         if self.n_speakers == 2:
             for i, x in enumerate(dia_len):
-                spk_idx[i, x:] = (2 * torch.ones(origin_spk_idx[i].size(0) - x)).int().cuda()
+                spk_idx[i, x:] = (2*torch.ones(origin_spk_idx[i].size(0)-x)).int().cuda()
         if self.n_speakers == 9:
             for i, x in enumerate(dia_len):
-                spk_idx[i, x:] = (9 * torch.ones(origin_spk_idx[i].size(0) - x)).int().cuda()
-
+                spk_idx[i, x:] = (9*torch.ones(origin_spk_idx[i].size(0)-x)).int().cuda()
         spk_embeddings = self.speaker_embeddings(spk_idx)
 
         textf = self.textf_input(textf.permute(1, 2, 0)).transpose(1, 2)
@@ -527,20 +433,15 @@ class CDCP(nn.Module):
         t_v_transformer_out = self.t_v_gate(v_v_transformer_out_smask)
         a_v_transformer_out = self.a_v_gate(v_v_transformer_out_cmask)
 
-        t_transformer_out = self.features_reduce_t(
-            torch.cat([t_t_transformer_out, a_t_transformer_out, v_t_transformer_out], dim=-1)
-        )
-        a_transformer_out = self.features_reduce_a(
-            torch.cat([a_a_transformer_out, t_a_transformer_out, v_a_transformer_out], dim=-1)
-        )
-        v_transformer_out = self.features_reduce_v(
-            torch.cat([v_v_transformer_out, t_v_transformer_out, a_v_transformer_out], dim=-1)
-        )
-
+        t_transformer_out = self.features_reduce_t(torch.cat([t_t_transformer_out, a_t_transformer_out, v_t_transformer_out], dim=-1))
+        a_transformer_out = self.features_reduce_a(torch.cat([a_a_transformer_out, t_a_transformer_out, v_a_transformer_out], dim=-1))
+        v_transformer_out = self.features_reduce_v(torch.cat([v_v_transformer_out, t_v_transformer_out, a_v_transformer_out], dim=-1))
         all_feature = torch.cat([t_transformer_out, a_transformer_out, v_transformer_out], dim=-1)
         out = self.MOE(all_feature, u_mask, spk_embeddings)
         all_transformer_out = self.fusion(out[0])
         loss_o = out[3]
+
+        B, N, D = textf.size()
 
         t_final_out = self.t_output_layer(t_transformer_out)
         a_final_out = self.a_output_layer(a_transformer_out)
@@ -554,4 +455,11 @@ class CDCP(nn.Module):
         all_log_prob = F.log_softmax(all_final_out, 2)
         all_prob = F.softmax(all_final_out, 2)
 
-        return t_log_prob, a_log_prob, v_log_prob, all_log_prob, all_prob, loss_o
+        kl_t_log_prob = F.log_softmax(t_final_out / self.temp, 2)
+        kl_a_log_prob = F.log_softmax(a_final_out / self.temp, 2)
+        kl_v_log_prob = F.log_softmax(v_final_out / self.temp, 2)
+
+        kl_all_prob = F.softmax(all_final_out / self.temp, 2)
+
+        return t_log_prob, a_log_prob, v_log_prob, all_log_prob, all_prob, \
+               kl_t_log_prob, kl_a_log_prob, kl_v_log_prob, kl_all_prob, loss_o
