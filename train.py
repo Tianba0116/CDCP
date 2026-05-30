@@ -1,21 +1,20 @@
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import warnings
-warnings.filterwarnings("ignore")  # 忽略所有警告
+warnings.filterwarnings("ignore")
 import numpy as np, argparse, time
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import SubsetRandomSampler
 from dataloader import IEMOCAPDataset, MELDDataset
-from model import MaskedNLLLoss, MaskedKLDivLoss, Transformer_Based_Model
+from model import MaskedNLLLoss, CDCP
 from sklearn.metrics import f1_score, confusion_matrix, accuracy_score, classification_report
 import pickle as pk
 import datetime
-import torch.nn.functional as F
 import random
 
-def get_train_valid_sampler(trainset, valid=0.1, dataset='MELD'):
+def get_train_valid_sampler(trainset, valid=0.1):
     size = len(trainset)
     idx = list(range(size))
     split = int(valid*size)
@@ -23,7 +22,7 @@ def get_train_valid_sampler(trainset, valid=0.1, dataset='MELD'):
 
 def get_MELD_loaders(batch_size=32, valid=0.1, num_workers=0, pin_memory=False):
     trainset = MELDDataset('/opt/data/private/try1/data/meld_multimodal_features.pkl')
-    train_sampler, valid_sampler = get_train_valid_sampler(trainset, valid, 'MELD')
+    train_sampler, valid_sampler = get_train_valid_sampler(trainset, valid)
     train_loader = DataLoader(trainset,
                               batch_size=batch_size,
                               sampler=train_sampler,
@@ -70,21 +69,7 @@ def get_IEMOCAP_loaders(batch_size=32, valid=0.1, num_workers=0, pin_memory=Fals
                              pin_memory=pin_memory)
     return train_loader, valid_loader, test_loader
 
-def pad_to_fixed_batch(tensor, fixed_size, dim):
-    current_size = tensor.shape[dim]  # 获取当前维度的大小
-
-    if current_size >= fixed_size:
-        # 若当前维度 >= 目标大小，则裁剪
-        return tensor.narrow(dim, 0, fixed_size)
-    else:
-        # 计算填充量
-        pad_shape = list(tensor.shape)
-        pad_shape[dim] = fixed_size - current_size  # 仅调整填充的维度
-        pad_tensor = torch.zeros(*pad_shape, dtype=tensor.dtype, device=tensor.device)  # 生成 0 填充张量
-
-        return torch.cat([tensor, pad_tensor], dim=dim)  # 拼接填充
-
-def  train_or_eval_model(args,model, loss_function, kl_loss, dataloader, epoch, optimizer=None, train=False, gamma_1=1.0, gamma_2=1.0, gamma_3=1.0):
+def train_or_eval_model(args, model, loss_function, dataloader, epoch, optimizer=None, train=False):
     losses, preds, labels, masks = [], [], [], []
 
     assert not train or optimizer!=None
@@ -96,19 +81,14 @@ def  train_or_eval_model(args,model, loss_function, kl_loss, dataloader, epoch, 
     for data in dataloader:
         if train:
             optimizer.zero_grad()
-        """
-        如果使用 GPU (cuda 为真)，则将批次数据中的每个元素（除了最后一个标签 data[:-1]）都转移到 GPU 上。
-        data[:-1] 表示从 data 中获取除了最后一个元素（标签）的所有元素。
-        """
         textf, visuf, acouf, qmask, umask, label = [d.cuda() for d in data[:-1]] if cuda else data[:-1]
-        # textf, visuf, acouf, qmask = [pad_to_fixed_batch(d, 128, 0) for d in [textf, visuf, acouf, qmask]]
-        # umask, label = [pad_to_fixed_batch(d, 128, 1) for d in [umask, label]]
 
         qmask = qmask.permute(1, 0, 2)
         lengths = [(umask[j] == 1).nonzero().tolist()[-1][0] + 1 for j in range(len(umask))]
 
-        log_prob1, log_prob2, log_prob3, all_log_prob, all_prob,loss_o,_ = model(textf, visuf, acouf, umask, qmask, lengths,label,args)
-        
+        log_prob1, log_prob2, log_prob3, all_log_prob, all_prob, \
+        _, _, _, _, loss_o = model(textf, visuf, acouf, umask, qmask, lengths)
+
         lp_1 = log_prob1.view(-1, log_prob1.size()[2])
         lp_2 = log_prob2.view(-1, log_prob2.size()[2])
         lp_3 = log_prob3.view(-1, log_prob3.size()[2])
@@ -117,11 +97,15 @@ def  train_or_eval_model(args,model, loss_function, kl_loss, dataloader, epoch, 
 
         alpha_1 = args.lambd[0]
         alpha_2 = args.lambd[1]
-        alpha_3 = args.lambd[3]
-        alpha_4 = args.lambd[4]
+        alpha_3 = args.lambd[2]
+        alpha_4 = args.lambd[3]
+        alpha_5 = args.lambd[4]
+
         loss = alpha_1 * loss_function(lp_all, labels_, umask) + \
-                alpha_1 * loss_function(lp_1, labels_, umask) + alpha_2 *loss_function(lp_2, labels_, umask) + alpha_3 * loss_function(lp_3, labels_, umask) + loss_o * alpha_4
-        #  loss = gamma_1 * loss_function(lp_all, labels_, umask) 
+               alpha_2 * loss_function(lp_1, labels_, umask) + \
+               alpha_3 * loss_function(lp_2, labels_, umask) + \
+               alpha_4 * loss_function(lp_3, labels_, umask) + \
+               loss_o * alpha_5
 
         lp_ = all_prob.view(-1, all_prob.size()[2])
 
@@ -147,7 +131,7 @@ def  train_or_eval_model(args,model, loss_function, kl_loss, dataloader, epoch, 
 
     avg_loss = round(np.sum(losses)/np.sum(masks), 4)
     avg_accuracy = round(accuracy_score(labels,preds, sample_weight=masks)*100, 2)
-    avg_fscore = round(f1_score(labels,preds, sample_weight=masks, average='weighted')*100, 2)  
+    avg_fscore = round(f1_score(labels,preds, sample_weight=masks, average='weighted')*100, 2)
     return avg_loss, avg_accuracy, labels, preds, masks, avg_fscore
 
 def set_seed(seed):
@@ -155,7 +139,7 @@ def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)  # if you are using multi-GPU.
+    torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
@@ -171,26 +155,21 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=100, metavar='E', help='number of epochs')
     parser.add_argument('--temp', type=int, default=1, metavar='temp', help='temp')
     parser.add_argument('--tensorboard', action='store_true', default=False, help='Enables tensorboard log')
-    parser.add_argument('--class-weight', action='store_true', default=True, help='use class weights')
     parser.add_argument('--Dataset', default='IEMOCAP', help='dataset to train and test')
-    parser.add_argument('--seed', type=int, default=93389, help='random seed')
-    # 53867
-
-    # 17346 31482
-    parser.add_argument('--alpha', type=float, default=0.1, help='diffusion')
+    parser.add_argument('--seed', type=int, default=51061, help='random seed')
     parser.add_argument('--steps', type=int, default=3, help='diffusion steps')
     parser.add_argument('--thera_hidden_dim', type=int, default=64, help='theta_hidden_dim for diffusion')
-    parser.add_argument('--fusion_weight', type=float, default=0.5, help='theta_hidden_dim for diffusion')
     parser.add_argument(
         "--lambd",
         nargs="+",
-        type=float, 
-        default=[1.0, 1.0, 1.0, 1.0,1.0],
-        help="[loss_emotion, loss_t,loss_a, loss_v,loss_o]",
+        type=float,
+        default=[0.5,0.4,0.6,0.8,0.5],
+        help="[loss_emotion, loss_t, loss_a, loss_v, loss_o]",
     )
     parser.add_argument('--MOE_depth', type=int, default=4, help='theta_hidden_dim for diffusion')
-    parser.add_argument('--num_latents', type=int, default=4, help='theta_hidden_dim for diffusion')
-                    
+    parser.add_argument('--save_dir', type=str, default=None, help='directory to save per-seed results')
+    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints', help='directory to save model checkpoints')
+
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -215,14 +194,12 @@ if __name__ == '__main__':
     D_visual = feat2dim['denseface']
     D_text = 1024
 
-    D_m = D_audio + D_visual + D_text
-
-    n_speakers = 9 if args.Dataset=='MELD' else 2
+    n_speakers= 9 if args.Dataset=='MELD' else 2
     n_classes = 7 if args.Dataset=='MELD' else 6 if args.Dataset=='IEMOCAP' else 1
 
     print('temp {}'.format(args.temp))
 
-    model = Transformer_Based_Model(args,args.Dataset, args.temp, D_text, D_visual, D_audio, args.n_head,
+    model = CDCP(args,args.Dataset, args.temp, D_text, D_visual, D_audio, args.n_head,
                                         n_classes=n_classes,
                                         hidden_dim=args.hidden_dim,
                                         n_speakers=n_speakers,
@@ -235,8 +212,7 @@ if __name__ == '__main__':
 
     if cuda:
         model.cuda()
-        
-    kl_loss = MaskedKLDivLoss()
+
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.l2)
 
     if args.Dataset == 'MELD':
@@ -259,19 +235,34 @@ if __name__ == '__main__':
         print("There is no such dataset")
 
     best_fscore, best_loss, best_label, best_pred, best_mask = None, None, None, None, None
-    all_fscore, all_acc, all_loss = [], [], []
+    best_test_acc = None
+    all_fscore = []
 
     for e in range(n_epochs):
         start_time = time.time()
 
-        train_loss, train_acc, _, _, _, train_fscore = train_or_eval_model(args,model, loss_function, kl_loss, train_loader, e, optimizer, True)
-        valid_loss, valid_acc, _, _, _, valid_fscore = train_or_eval_model(args,model, loss_function, kl_loss, valid_loader, e)
-        test_loss, test_acc, test_label, test_pred, test_mask, test_fscore = train_or_eval_model(args,model, loss_function, kl_loss, test_loader, e)
+        train_loss, train_acc, _, _, _, train_fscore = train_or_eval_model(args,model, loss_function, train_loader, e, optimizer, True)
+        valid_loss, valid_acc, _, _, _, valid_fscore = train_or_eval_model(args,model, loss_function, valid_loader, e)
+        test_loss, test_acc, test_label, test_pred, test_mask, test_fscore = train_or_eval_model(args,model, loss_function, test_loader, e)
         all_fscore.append(test_fscore)
 
         if best_fscore == None or best_fscore < test_fscore:
             best_fscore = test_fscore
+            best_test_acc = test_acc
             best_label, best_pred, best_mask = test_label, test_pred, test_mask
+
+            if args.checkpoint_dir:
+                ckpt_dir = os.path.join(args.checkpoint_dir, args.Dataset)
+                os.makedirs(ckpt_dir, exist_ok=True)
+                ckpt_path = os.path.join(ckpt_dir, f"best_seed_{args.seed}.pt")
+                torch.save({
+                    'epoch': e + 1,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'best_fscore': best_fscore,
+                    'best_test_acc': best_test_acc,
+                    'args': args,
+                }, ckpt_path)
 
         if args.tensorboard:
             writer.add_scalar('test: accuracy', test_acc, e)
@@ -292,7 +283,7 @@ if __name__ == '__main__':
     print('Test performance..')
     print('F-Score: {}'.format(max(all_fscore)))
     print('F-Score-index: {}'.format(all_fscore.index(max(all_fscore)) + 1))
-    
+
     if not os.path.exists("record_{}_{}_{}.pk".format(today.year, today.month, today.day)):
         with open("record_{}_{}_{}.pk".format(today.year, today.month, today.day),'wb') as f:
             pk.dump({}, f)
@@ -313,4 +304,8 @@ if __name__ == '__main__':
     print(classification_report(best_label, best_pred, sample_weight=best_mask,digits=4))
     print(confusion_matrix(best_label,best_pred,sample_weight=best_mask))
 
-
+    if args.save_dir:
+        os.makedirs(args.save_dir, exist_ok=True)
+        with open(os.path.join(args.save_dir, f"seed_{args.seed}.txt"), "w") as f:
+            f.write(f"{best_fscore}\t{best_test_acc}\n")
+        print(f"Result saved to {os.path.join(args.save_dir, f'seed_{args.seed}.txt')}")
