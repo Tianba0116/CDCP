@@ -17,6 +17,10 @@ Code for the paper. Training & evaluation pipeline for multimodal emotion recogn
 └── README.md
 ```
 
+## Dataset
+
+Download the preprocessed features from [here](https://drive.google.com/drive/folders/1J1mvbqQmVodNBzbiOIxRiWOtkP6qqP-K) and place the `.pkl` files into the `data/` directory.
+
 ## Requirements
 
 ```bash
