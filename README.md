@@ -63,6 +63,16 @@ bash exec_iemocap.sh  # IEMOCAP experiments
 
 ## Checkpoints
 
+### Download Pre-trained Checkpoints
+
+Our trained model checkpoints for MELD and IEMOCAP are available here:
+
+[**📥 Download Checkpoints (Google Drive)**](https://drive.google.com/drive/folders/1Ap1O49H6_80hWhFLLlZnluEuWs-NtPBR?usp=drive_link)
+
+Download the `.pt` files and place them under `checkpoints/{Dataset}/` to run evaluation.
+
+### Checkpoint Files
+
 During training, two `.pt` files are saved per run under `{checkpoint_dir}/{Dataset}/`:
 
 - `best_seed_{seed}.pt` — updated whenever test F1 reaches a new best
