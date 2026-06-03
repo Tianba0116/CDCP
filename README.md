@@ -1,4 +1,4 @@
-# CDCP — Cross-modal Decoupling and Consensus Perception for Multimodal Emotion Recognition
+# CDCP — Conflict-Aware Dual-Path Context Propagation for Multimodal Emotion Recognition in Conversation
 
 Code for the paper. Training & evaluation pipeline for multimodal emotion recognition.
 
