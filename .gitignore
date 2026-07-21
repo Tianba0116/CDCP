@@ -1,0 +1,9 @@
+__pycache__/
+checkpoints/
+data/
+results/
+.claude/
+.vscode/
+response.tex
+*.pt
+*.pth

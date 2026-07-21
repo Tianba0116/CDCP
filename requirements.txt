@@ -1,0 +1,5 @@
+torch>=1.9.0
+numpy
+scikit-learn
+pandas
+tensorboardX          # optional: for --tensorboard logging
