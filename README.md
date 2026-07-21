@@ -1,6 +1,12 @@
 # CDCP — Conflict-Aware Dual-Path Context Propagation for Multimodal Emotion Recognition in Conversation
 
+**Accepted at the 34th ACM International Conference on Multimedia (ACM MM 2026)**
+
 Code for the paper. Training & evaluation pipeline for multimodal emotion recognition.
+
+## Model Architecture
+
+![CDCP Architecture](image/CDCP_architecture.png)
 
 ## Project Structure
 
@@ -116,7 +122,18 @@ Best Acc: 68.12
 
 ## Citation
 
-If you use this code, please cite the corresponding paper.
+If you use this code or find our work helpful, please cite:
+
+```bibtex
+@inproceedings{cdcp2026,
+  title     = {Conflict-Aware Dual-Path Context Propagation for Multimodal Emotion Recognition in Conversation},
+  author    = {},
+  booktitle = {Proceedings of the 34th ACM International Conference on Multimedia (MM '26)},
+  year      = {2026},
+  publisher = {ACM},
+  doi       = {}
+}
+```
 
 ## License
 
